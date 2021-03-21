@@ -3,6 +3,8 @@
 import Data.Text (Text)
 import Data.Int (Int)
 import Data.Void
+import Data.Maybe
+import Data.Char
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Data.Text as T
@@ -10,14 +12,28 @@ import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser a = Parsec Void Text a
 
+newtype Identifier = Id Text
+  deriving (Eq, Ord, Show)
+
+data Declaration
+  = TypeDec Identifier Type
+  | VarDec Identifier (Maybe Identifier) Expr
+  | FunDec Identifier [TyField] (Maybe Identifier) Expr
+  deriving (Eq, Ord, Show)
+
+data Type
+  = NameTy Identifier
+  | RecordTy [TyField]
+  | ArrayTy Identifier
+  deriving (Eq, Ord, Show)
+
+data TyField
+  = Field Identifier Identifier
+  deriving (Eq, Ord, Show)
+
 data Expr
   = Int Int
   | Binary Expr Text Expr
-  | Id Text
-  | Decs [Expr]
-  | TypeDec Expr Expr
-  | ArrayTy Expr
-  | VarDec Expr Expr
   deriving (Eq, Ord, Show)
 
 sc :: Parser ()
@@ -35,26 +51,51 @@ symbol = L.symbol sc
 integer :: Parser Expr
 integer = Int <$> lexeme L.decimal
 
--- TODO: fix
-identifier :: Parser Expr
--- identifier = lexeme $ fmap (\chs -> Id $ T.pack chs) $ some letterChar
-identifier = (\chs -> Id $ T.pack chs) <$> (lexeme $ some letterChar)
+identifier :: Parser Identifier
+-- identifier = (\head tail -> Id $ T.pack $ head ++ tail) <$>
+identifier = lexeme $ (\head tail -> Id $ T.pack head) <$>
+  (some letterChar) <*> (many $ satisfy isIdChar)
+  where
+    isIdChar x = (isAlphaNum x) || x == '_'
 
-decs :: Parser Expr
-decs = Decs <$> many dec
+decs :: Parser [Declaration]
+decs = many dec
 
-dec :: Parser Expr
-dec = tydec <|> vardec -- <|> fundec
+dec :: Parser Declaration
+dec = tydec <|> vardec <|> fundec
 
-tydec :: Parser Expr
+tydec :: Parser Declaration
 tydec = (\_ name _ ty -> TypeDec name ty) <$> (symbol "type") <*> identifier <*> (symbol "=") <*> ty
 
-ty :: Parser Expr
-ty = identifier <|>
-  (\_ _ ty -> ArrayTy ty) <$> (symbol "array") <*> (symbol "of") <*> identifier
+ty :: Parser Type
+ty =
+  (\_ _ ty -> ArrayTy ty) <$> (symbol "array") <*> (symbol "of") <*> identifier <|>
+  (\_ fields _ -> RecordTy fields) <$> (symbol "{") <*> tyfields <*> (symbol "}") <|>
+  NameTy <$> identifier
 
-vardec :: Parser Expr
-vardec = (\_ id _ ex -> VarDec id ex) <$> (symbol "var") <*> identifier <*> (symbol ":=") <*> expr
+tyfields :: Parser [TyField]
+tyfields =
+  (\head rest -> [head] ++ rest) <$> tyfield <*> many tfrest <|>
+  return []
+  where
+    tfrest = (\_ tf -> tf) <$> (symbol ",") <*> tyfield
+
+tyfield :: Parser TyField
+tyfield = (\id _ tyid -> Field id tyid) <$> identifier <*> (symbol ":") <*> identifier
+
+vardec :: Parser Declaration
+vardec = (\_ id tyannot _ ex -> VarDec id tyannot ex) <$> (symbol "var") <*> identifier <*> (optional tyannot) <*> (symbol ":=") <*> expr
+
+fundec :: Parser Declaration
+fundec = (\_ id _ params _ tyannot _ body -> FunDec id params tyannot body) <$> (symbol "function") <*> identifier <*> (symbol "(") <*> tyfields <*> (symbol ")") <*> (optional tyannot) <*> (symbol "=") <*> expr
+
+tyannot :: Parser Identifier
+tyannot = try $ (\_ ty -> ty) <$> (symbol ":") <*> identifier
+
+expr :: Parser Expr
+expr =
+  try (Binary <$> atom <*> (symbol "+") <*> atom) <|>
+  (Binary <$> atom <*> (symbol "-") <*> atom)
 
 atom :: Parser Expr
 atom = do
@@ -64,16 +105,11 @@ atom = do
     return x
   <|> integer
 
-expr :: Parser Expr
-expr =
-  try (Binary <$> atom <*> (symbol "+") <*> atom) <|>
-  (Binary <$> atom <*> (symbol "-") <*> atom)
-
-whole :: Parser Expr
+whole :: Parser [Declaration]
 whole = do
-    ex <- decs
+    d <- decs
     eof
-    return ex
+    return d
 
 main :: IO ()
 main = do
