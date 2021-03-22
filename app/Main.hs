@@ -44,6 +44,7 @@ data Expr
   | StringLit Text
   | IfExpr Expr Expr Expr
   | LetExpr [Declaration] [Expr]
+  | BinaryExpr Expr Text Expr
   deriving (Eq, Ord, Show)
 
 sc :: Parser ()
@@ -110,14 +111,51 @@ expr :: Parser Expr
 expr =
       try (dbg "if" ifexpr)
   <|> try (dbg "let" letexpr)
-  <|> try (dbg "nil" ((\_ -> NilExpr) <$> symbol "nil"))
   <|> try (dbg "sequence" ((\_ exprs _ -> SeqExpr exprs) <$> symbol "(" <*> seqexpr <*> symbol ")"))
-  <|> try integerlit
-  <|> try (dbg "string" stringlit)
-  <|> try (ValueExpr <$> lvalue)
+  <|> try (dbg "arith1" arith1)
   where
     seqexpr = (\head rest -> [head] ++ rest) <$> expr <*> some seqexprrest
     seqexprrest = (\_ e -> e) <$> symbol ";" <*> expr
+
+-- arith1 :: Parser Expr
+-- arith1 = try (BinaryExpr <$> arith2 <*> op <*> expr)
+--      <|> arith2
+--   where
+--     op = symbol "+" <|> symbol "-"
+
+data PartialExpr
+  = PE Text Expr PartialExpr
+  | Term
+  deriving (Eq, Ord, Show)
+
+buildBE left Term = left
+buildBE left (PE op right rest) =
+  let left' = BinaryExpr left op right in
+  buildBE left' rest
+
+arith1 :: Parser Expr
+arith1 = buildBE <$> (dbg "arith2" arith2) <*> (dbg "arith1'" arith1')
+  where
+    arith1' :: Parser PartialExpr
+    arith1' = try (PE <$> op <*> arith2 <*> arith1')
+          <|> return Term
+    op = symbol "+" <|> symbol "-"
+
+arith2 :: Parser Expr
+arith2 = buildBE <$> arith3 <*> arith2'
+  where
+    arith2' :: Parser PartialExpr
+    arith2' = try (PE <$> op <*> arith3 <*> arith2')
+          <|> return Term
+    op = symbol "*" <|> symbol "/"
+
+arith3 = term
+
+term :: Parser Expr
+term = try integerlit
+   <|> try (dbg "nil" ((\_ -> NilExpr) <$> symbol "nil"))
+   <|> try (dbg "string" stringlit)
+   <|> try (ValueExpr <$> lvalue)
 
 integerlit :: Parser Expr
 integerlit = IntLit <$> lexeme L.decimal
