@@ -7,6 +7,7 @@ import Data.Maybe
 import Data.Char
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
+import Text.Megaparsec.Debug
 import qualified Data.Text as T
 import qualified Text.Megaparsec.Char.Lexer as L
 
@@ -31,9 +32,18 @@ data TyField
   = Field Identifier Identifier
   deriving (Eq, Ord, Show)
 
+data LValue
+  = Variable Identifier
+  deriving (Eq, Ord, Show)
+
 data Expr
-  = Int Int
-  | Binary Expr Text Expr
+  = ValueExpr LValue
+  | NilExpr
+  | SeqExpr [Expr]
+  | IntLit Int
+  | StringLit Text
+  | IfExpr Expr Expr Expr
+  | LetExpr [Declaration] [Expr]
   deriving (Eq, Ord, Show)
 
 sc :: Parser ()
@@ -47,9 +57,6 @@ lexeme = L.lexeme sc
 
 symbol :: Text -> Parser Text
 symbol = L.symbol sc
-
-integer :: Parser Expr
-integer = Int <$> lexeme L.decimal
 
 identifier :: Parser Identifier
 -- identifier = (\head tail -> Id $ T.pack $ head ++ tail) <$>
@@ -84,32 +91,74 @@ tyfield :: Parser TyField
 tyfield = (\id _ tyid -> Field id tyid) <$> identifier <*> (symbol ":") <*> identifier
 
 vardec :: Parser Declaration
-vardec = (\_ id tyannot _ ex -> VarDec id tyannot ex) <$> (symbol "var") <*> identifier <*> (optional tyannot) <*> (symbol ":=") <*> expr
+vardec = (\_ id tyannot _ ex -> VarDec id tyannot ex) <$>
+  (symbol "var") <*> identifier <*> (optional tyannot) <*> (symbol ":=") <*> expr
 
 fundec :: Parser Declaration
-fundec = (\_ id _ params _ tyannot _ body -> FunDec id params tyannot body) <$> (symbol "function") <*> identifier <*> (symbol "(") <*> tyfields <*> (symbol ")") <*> (optional tyannot) <*> (symbol "=") <*> expr
+fundec = (\_ id _ params _ tyannot _ body -> FunDec id params tyannot body) <$>
+         (symbol "function") <*> identifier <*> (symbol "(") <*> tyfields <*> (symbol ")") <*> (optional tyannot) <*> (symbol "=") <*> expr
 
 tyannot :: Parser Identifier
 tyannot = try $ (\_ ty -> ty) <$> (symbol ":") <*> identifier
 
+-- TODO: add record and array
+lvalue :: Parser LValue
+lvalue =
+  try (Variable <$> identifier)
+
 expr :: Parser Expr
 expr =
-  try (Binary <$> atom <*> (symbol "+") <*> atom) <|>
-  (Binary <$> atom <*> (symbol "-") <*> atom)
+      try (dbg "if" ifexpr)
+  <|> try (dbg "let" letexpr)
+  <|> try (dbg "nil" ((\_ -> NilExpr) <$> symbol "nil"))
+  <|> try (dbg "sequence" ((\_ exprs _ -> SeqExpr exprs) <$> symbol "(" <*> seqexpr <*> symbol ")"))
+  <|> try integerlit
+  <|> try (dbg "string" stringlit)
+  <|> try (ValueExpr <$> lvalue)
+  where
+    seqexpr = (\head rest -> [head] ++ rest) <$> expr <*> some seqexprrest
+    seqexprrest = (\_ e -> e) <$> symbol ";" <*> expr
 
-atom :: Parser Expr
-atom = do
-    symbol "("
-    x <- expr
-    symbol ")"
-    return x
-  <|> integer
+integerlit :: Parser Expr
+integerlit = IntLit <$> lexeme L.decimal
 
-whole :: Parser [Declaration]
+stringlit :: Parser Expr
+stringlit = lexeme $ (\_ str _ -> StringLit $ T.pack $ foldl (++) "" str) <$> char '\"' <*> (many (dbg "ch" ch)) <*> char '\"'
+  where
+    ch :: Parser [Char]
+    ch =  (\c -> [c]) <$> satisfy (\c -> c /= '\"' && isPrint c)
+      <|> (\s c -> [s] ++ c) <$> char '\\' <*> escCh
+
+    escCh :: Parser [Char]
+    escCh = one <$> char 'n' <|> one <$> char 't' <|> T.unpack <$> string "^C"
+          -- <|> \ddd ...
+
+    one e = [e]
+
+ifexpr :: Parser Expr
+ifexpr =
+  -- this is not correct???
+  -- IfExpr <$> symbol "if" *> expr <* symbol "then" *> expr <* symbol "else" *> expr
+  (\e1 e2 e3 -> IfExpr) <$> symbol "if" *> expr <* symbol "then" *> expr <* symbol "else" *> expr
+
+letexpr :: Parser Expr
+letexpr = (\_ decs _ exprs _ -> LetExpr decs exprs) <$>
+    symbol "let" <*> decs <*> symbol "in" <*> seqexpr <*> symbol "end"
+  where
+    seqexpr = (\head rest -> [head] ++ rest) <$> expr <*> many seqexprrest <|>
+              return []
+    seqexprrest = (\_ e -> e) <$> symbol ";" <*> expr
+
+-- expr :: Parser Expr
+-- expr =
+--   try (Binary <$> atom <*> (symbol "+") <*> atom) <|>
+--   (Binary <$> atom <*> (symbol "-") <*> atom)
+
+whole :: Parser Expr
 whole = do
-    d <- decs
+    prog <- expr
     eof
-    return d
+    return prog
 
 main :: IO ()
 main = do
