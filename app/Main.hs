@@ -8,7 +8,9 @@ import Data.Char
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import Text.Megaparsec.Debug
+import System.Environment (getArgs)
 import qualified Data.Text as T
+import qualified Data.Text.IO as IO
 import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser a = Parsec Void Text a
@@ -219,9 +221,11 @@ whole = do
 
 main :: IO ()
 main = do
-  putStrLn "Enter expression:"
-  s <- getLine
-  case parse whole "stdin" (T.pack s) of
+  args <- getArgs
+  let srcPath = args !! 0
+
+  s <- IO.readFile srcPath
+  case parse whole srcPath s of
     Left err -> print err
     Right x -> print x
 
