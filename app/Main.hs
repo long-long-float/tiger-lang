@@ -45,6 +45,7 @@ data Expr
   | IfExpr Expr Expr Expr
   | LetExpr [Declaration] [Expr]
   | BinaryExpr Expr Text Expr
+  | UnaryExpr Text Expr
   deriving (Eq, Ord, Show)
 
 sc :: Parser ()
@@ -112,7 +113,7 @@ expr =
       try (dbg "if" ifexpr)
   <|> try (dbg "let" letexpr)
   <|> try (dbg "sequence" ((\_ exprs _ -> SeqExpr exprs) <$> symbol "(" <*> seqexpr <*> symbol ")"))
-  <|> try (dbg "arith1" arith1)
+  <|> try boolop1
   where
     seqexpr = (\head rest -> [head] ++ rest) <$> expr <*> some seqexprrest
     seqexprrest = (\_ e -> e) <$> symbol ";" <*> expr
@@ -133,29 +134,47 @@ buildBE left (PE op right rest) =
   let left' = BinaryExpr left op right in
   buildBE left' rest
 
-arith1 :: Parser Expr
-arith1 = buildBE <$> (dbg "arith2" arith2) <*> (dbg "arith1'" arith1')
+buildOperators ops child = p
   where
-    arith1' :: Parser PartialExpr
-    arith1' = try (PE <$> op <*> arith2 <*> arith1')
-          <|> return Term
-    op = symbol "+" <|> symbol "-"
+    p :: Parser Expr
+    p = buildBE <$> child <*> p'
+      where
+        p' :: Parser PartialExpr
+        p' = try (PE <$> op <*> child <*> p')
+              <|> return Term
+        ops2p [op] = symbol op
+        ops2p (x:xs) = symbol x <|> ops2p xs
+        op = ops2p ops
+
+boolop1 :: Parser Expr
+boolop1 = buildOperators ["&"] boolop2
+
+boolop2 :: Parser Expr
+boolop2 = buildOperators ["|"] comp1
+
+comp1 :: Parser Expr
+comp1 = try (BinaryExpr <$> arith1 <*> op <*> arith1) <|>
+        arith1
+  where
+    op = symbol "=" <|> symbol "<>" <|> symbol ">" <|> symbol "<"
+     <|> symbol ">=" <|> symbol "<="
+
+arith1 :: Parser Expr
+arith1 = buildOperators ["+", "-"] arith2
 
 arith2 :: Parser Expr
-arith2 = buildBE <$> arith3 <*> arith2'
-  where
-    arith2' :: Parser PartialExpr
-    arith2' = try (PE <$> op <*> arith3 <*> arith2')
-          <|> return Term
-    op = symbol "*" <|> symbol "/"
+arith2 = buildOperators ["*", "/"] unary
 
-arith3 = term
+unary :: Parser Expr
+unary = UnaryExpr <$> symbol "-" <*> term <|>
+        term
 
 term :: Parser Expr
 term = try integerlit
    <|> try (dbg "nil" ((\_ -> NilExpr) <$> symbol "nil"))
    <|> try (dbg "string" stringlit)
    <|> try (ValueExpr <$> lvalue)
+   <|> symbol "(" *> expr <* symbol ")"
 
 integerlit :: Parser Expr
 integerlit = IntLit <$> lexeme L.decimal
