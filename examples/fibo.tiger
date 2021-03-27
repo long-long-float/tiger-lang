@@ -1,0 +1,7 @@
+let
+  function fibo(n: int) =
+    if n <= 1 then 1
+    else fibo(n - 2) + fibo(n - 1)
+
+  in fibo(10) /* = 34 */
+end

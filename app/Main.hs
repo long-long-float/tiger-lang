@@ -35,7 +35,9 @@ data TyField
   deriving (Eq, Ord, Show)
 
 data LValue
-  = Variable Identifier
+  = SimpleVar Identifier
+  | FieldVar LValue Identifier
+  | SubscriptVar LValue Expr
   deriving (Eq, Ord, Show)
 
 data Expr
@@ -44,8 +46,10 @@ data Expr
   | SeqExpr [Expr]
   | IntLit Int
   | StringLit Text
+  | ArrayCreation Identifier Expr Expr
   | IfExpr Expr Expr Expr
   | LetExpr [Declaration] [Expr]
+  | FunctionCall Identifier [Expr]
   | BinaryExpr Expr Text Expr
   | UnaryExpr Text Expr
   deriving (Eq, Ord, Show)
@@ -105,17 +109,35 @@ fundec = (\_ id _ params _ tyannot _ body -> FunDec id params tyannot body) <$>
 tyannot :: Parser Identifier
 tyannot = try $ (\_ ty -> ty) <$> (symbol ":") <*> identifier
 
--- TODO: add record and array
+data PartialLValue
+  = PLArray Expr PartialLValue
+  | PLDot   Identifier PartialLValue
+  | PLTerm
+
 lvalue :: Parser LValue
-lvalue =
-  try (Variable <$> identifier)
+lvalue = buildLValue <$> identifier <*> lvalue'
+  where
+    buildLValue id lv = buildLValue' (SimpleVar id) lv
+
+    buildLValue' id PLTerm = id
+    buildLValue' id (PLArray index rest) =
+      let left = SubscriptVar id index in
+      buildLValue' left rest
+    buildLValue' id (PLDot field rest) =
+      let left = FieldVar id field in
+      buildLValue' left rest
+
+    lvalue' :: Parser PartialLValue
+    lvalue' = try ((\_ i _ r -> PLArray i r) <$> symbol "[" <*> expr <*> symbol "]" <*> lvalue')
+          <|> try ((\_ f r -> PLDot f r) <$> symbol "." <*> identifier <*> lvalue')
+          <|> return PLTerm
 
 expr :: Parser Expr
 expr =
       try (dbg "if" ifexpr)
   <|> try (dbg "let" letexpr)
   <|> try (dbg "sequence" ((\_ exprs _ -> SeqExpr exprs) <$> symbol "(" <*> seqexpr <*> symbol ")"))
-  <|> try boolop1
+  <|> try (dbg "boolop" boolop1)
   where
     seqexpr = (\head rest -> [head] ++ rest) <$> expr <*> some seqexprrest
     seqexprrest = (\_ e -> e) <$> symbol ";" <*> expr
@@ -128,22 +150,22 @@ expr =
 
 data PartialExpr
   = PE Text Expr PartialExpr
-  | Term
+  | PETerm
   deriving (Eq, Ord, Show)
-
-buildBE left Term = left
-buildBE left (PE op right rest) =
-  let left' = BinaryExpr left op right in
-  buildBE left' rest
 
 buildOperators ops child = p
   where
+    buildBE left PETerm = left
+    buildBE left (PE op right rest) =
+      let left' = BinaryExpr left op right in
+      buildBE left' rest
+
     p :: Parser Expr
     p = buildBE <$> child <*> p'
       where
         p' :: Parser PartialExpr
         p' = try (PE <$> op <*> child <*> p')
-              <|> return Term
+              <|> return PETerm
         ops2p [op] = symbol op
         ops2p (x:xs) = symbol x <|> ops2p xs
         op = ops2p ops
@@ -158,8 +180,7 @@ comp1 :: Parser Expr
 comp1 = try (BinaryExpr <$> arith1 <*> op <*> arith1) <|>
         arith1
   where
-    op = symbol "=" <|> symbol "<>" <|> symbol ">" <|> symbol "<"
-     <|> symbol ">=" <|> symbol "<="
+    op = symbol ">=" <|> symbol "<=" <|> symbol "=" <|> symbol "<>" <|> symbol ">" <|> symbol "<"
 
 arith1 :: Parser Expr
 arith1 = buildOperators ["+", "-"] arith2
@@ -175,8 +196,15 @@ term :: Parser Expr
 term = try integerlit
    <|> try (dbg "nil" ((\_ -> NilExpr) <$> symbol "nil"))
    <|> try (dbg "string" stringlit)
+   <|> try (FunctionCall <$> identifier <* symbol "(" <*> args <* symbol ")")
+   <|> try (dbg "arraycreation" ((\t e1 _ e2 -> ArrayCreation t e1 e2) <$> identifier <* symbol "[" <*> expr <* symbol "]" <*> symbol "of" <*> expr))
    <|> try (ValueExpr <$> lvalue)
    <|> symbol "(" *> expr <* symbol ")"
+   where
+    args :: Parser [Expr]
+    args = (\head rest -> [head] ++ rest) <$> expr <*> many argrest <|>
+           return []
+    argrest = symbol "," *> expr
 
 integerlit :: Parser Expr
 integerlit = IntLit <$> lexeme L.decimal
@@ -198,20 +226,16 @@ ifexpr :: Parser Expr
 ifexpr =
   -- this is not correct???
   -- IfExpr <$> symbol "if" *> expr <* symbol "then" *> expr <* symbol "else" *> expr
-  (\e1 e2 e3 -> IfExpr) <$> symbol "if" *> expr <* symbol "then" *> expr <* symbol "else" *> expr
+  (\_ e1 _ e2 _ e3 -> IfExpr e1 e2 e3) <$> symbol "if" <*> expr <*> symbol "then" <*> expr <*> symbol "else" <*> expr
+  -- IfExpr <$> symbol "if" *> expr <* symbol "then" <*> expr <* symbol "else" <*> expr
 
 letexpr :: Parser Expr
 letexpr = (\_ decs _ exprs _ -> LetExpr decs exprs) <$>
-    symbol "let" <*> decs <*> symbol "in" <*> seqexpr <*> symbol "end"
+    symbol "let" <*> (dbg "decs" decs) <*> symbol "in" <*> seqexpr <*> symbol "end"
   where
     seqexpr = (\head rest -> [head] ++ rest) <$> expr <*> many seqexprrest <|>
               return []
     seqexprrest = (\_ e -> e) <$> symbol ";" <*> expr
-
--- expr :: Parser Expr
--- expr =
---   try (Binary <$> atom <*> (symbol "+") <*> atom) <|>
---   (Binary <$> atom <*> (symbol "-") <*> atom)
 
 whole :: Parser Expr
 whole = do
@@ -226,6 +250,6 @@ main = do
 
   s <- IO.readFile srcPath
   case parse whole srcPath s of
-    Left err -> print err
+    Left err -> putStr $ errorBundlePretty err
     Right x -> print x
 
