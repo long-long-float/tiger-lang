@@ -8,12 +8,32 @@ import Data.Char
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import Text.Megaparsec.Debug
+import Control.Monad.State
 import System.Environment (getArgs)
+import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.IO as IO
 import qualified Text.Megaparsec.Char.Lexer as L
 
-type Parser a = Parsec Void Text a
+data Symbol = Symbol Text Int
+type SymbolTable = M.Map Text Int
+type StateM = State SymbolTable
+
+name2symbol :: Text -> StateM Symbol
+name2symbol name = do
+  st <- get
+  let res = M.lookup name st
+  case res of
+    Just i -> return $ Symbol name i
+    Nothing -> do
+      let next = (M.size st) + 1
+      put $ M.insert name next st
+      return $ Symbol name next
+
+symbol2name :: Symbol -> Text
+symbol2name (Symbol s n) = s
+
+type Parser a = ParsecT Void Text (State SymbolTable) a
 
 newtype Identifier = Id Text
   deriving (Eq, Ord, Show)
@@ -54,6 +74,11 @@ data Expr
   | UnaryExpr Text Expr
   deriving (Eq, Ord, Show)
 
+data EnvEntry
+  = VarEntry Type
+  | FunEntry { formals :: [Type], result :: Type }
+data Table a = Table a
+
 sc :: Parser ()
 sc = L.space
   space1
@@ -67,10 +92,15 @@ symbol :: Text -> Parser Text
 symbol = L.symbol sc
 
 identifier :: Parser Identifier
--- identifier = (\head tail -> Id $ T.pack $ head ++ tail) <$>
-identifier = lexeme $ (\head tail -> Id $ T.pack head) <$>
+identifier = lexeme $ register $ (\head tail -> Id $ T.pack $ head ++ tail) <$>
   (some letterChar) <*> (many $ satisfy isIdChar)
   where
+    register :: Parser Identifier -> Parser Identifier
+    register id = do
+      (Id name) <- lookAhead id
+      lift $ name2symbol name
+      id
+
     isIdChar x = (isAlphaNum x) || x == '_'
 
 decs :: Parser [Declaration]
@@ -239,6 +269,7 @@ letexpr = (\_ decs _ exprs _ -> LetExpr decs exprs) <$>
 
 whole :: Parser Expr
 whole = do
+    _ <- sc
     prog <- expr
     eof
     return prog
@@ -247,9 +278,11 @@ main :: IO ()
 main = do
   args <- getArgs
   let srcPath = args !! 0
-
   s <- IO.readFile srcPath
-  case parse whole srcPath s of
-    Left err -> putStr $ errorBundlePretty err
-    Right x -> print x
+  let st = runParserT whole srcPath s
+  case runState st M.empty of
+    (Left err, _) -> putStr $ errorBundlePretty err
+    (Right x, symbols) -> do
+      print x
+      print symbols
 
