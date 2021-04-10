@@ -25,6 +25,8 @@ dependencies:
 - text
 - containers
 - mtl
+- exceptions
+- safe
 
 library:
   source-dirs: src

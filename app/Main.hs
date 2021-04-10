@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+import Prelude hiding (id)
 import Data.Text (Text)
 import Data.Int (Int)
 import Data.Void
@@ -10,12 +11,18 @@ import Text.Megaparsec.Char
 import Text.Megaparsec.Debug
 import Control.Monad.State
 import System.Environment (getArgs)
+import qualified Control.Monad.Catch as C
 import qualified Data.Map.Strict as M
+import qualified Data.IntMap.Strict as IM
 import qualified Data.Text as T
 import qualified Data.Text.IO as IO
 import qualified Text.Megaparsec.Char.Lexer as L
+import qualified Safe as S
 
-data Symbol = Symbol Text Int
+import qualified Types as Ty
+
+data Symbol = Symbol { name :: Text, id :: Int }
+  deriving (Eq, Ord, Show)
 type SymbolTable = M.Map Text Int
 type StateM = State SymbolTable
 
@@ -33,30 +40,29 @@ name2symbol name = do
 symbol2name :: Symbol -> Text
 symbol2name (Symbol s n) = s
 
+type Table = IM.IntMap
+
 type Parser a = ParsecT Void Text (State SymbolTable) a
 
-newtype Identifier = Id Text
-  deriving (Eq, Ord, Show)
-
 data Declaration
-  = TypeDec Identifier Type
-  | VarDec Identifier (Maybe Identifier) Expr
-  | FunDec Identifier [TyField] (Maybe Identifier) Expr
+  = TypeDec Symbol Type
+  | VarDec Symbol (Maybe Symbol) Expr
+  | FunDec Symbol [TyField] (Maybe Symbol) Expr
   deriving (Eq, Ord, Show)
 
 data Type
-  = NameTy Identifier
+  = NameTy Symbol
   | RecordTy [TyField]
-  | ArrayTy Identifier
+  | ArrayTy Symbol
   deriving (Eq, Ord, Show)
 
 data TyField
-  = Field Identifier Identifier
+  = Field Symbol Symbol
   deriving (Eq, Ord, Show)
 
 data LValue
-  = SimpleVar Identifier
-  | FieldVar LValue Identifier
+  = SimpleVar Symbol
+  | FieldVar LValue Symbol
   | SubscriptVar LValue Expr
   deriving (Eq, Ord, Show)
 
@@ -66,18 +72,158 @@ data Expr
   | SeqExpr [Expr]
   | IntLit Int
   | StringLit Text
-  | ArrayCreation Identifier Expr Expr
+  | ArrayCreation Symbol Expr Expr
   | IfExpr Expr Expr Expr
   | LetExpr [Declaration] [Expr]
-  | FunctionCall Identifier [Expr]
+  | FunctionCall Symbol [Expr]
   | BinaryExpr Expr Text Expr
   | UnaryExpr Text Expr
   deriving (Eq, Ord, Show)
 
 data EnvEntry
-  = VarEntry Type
-  | FunEntry { formals :: [Type], result :: Type }
-data Table a = Table a
+  = VarEntry Ty.Type
+  | FunEntry { formals :: [Ty.Type], result :: Ty.Type }
+  deriving (Eq, Ord, Show)
+
+type VEnv = Table EnvEntry
+type TEnv = Table Ty.Type
+type EnvStateT m a = StateT (VEnv, TEnv) m a
+
+data ExprTy = ExprTy { typ :: Ty.Type }
+  deriving (Eq, Ord, Show)
+
+data TypeException = TypeException Text deriving (Show)
+instance C.Exception TypeException
+data UnimplementedException = UnimplementedException Text deriving (Show)
+instance C.Exception UnimplementedException
+
+fromAbstType :: (C.MonadThrow m) => Type -> EnvStateT m Ty.Type
+fromAbstType (NameTy sym) = getType sym
+fromAbstType (RecordTy fields) = C.throwM $ UnimplementedException "fromAbstType"
+fromAbstType (ArrayTy inner) = do
+  inner <- getType inner
+  return $ Ty.Array inner
+
+(-+-) :: Text -> Text -> Text
+a -+- b = T.append a b
+
+(-+$) :: Text -> String -> Text
+a -+$ b = T.append a (T.pack b)
+
+quoteTy :: Ty.Type -> Text
+quoteTy ty = "'" -+$ (show ty) -+- "'"
+
+expectsType :: (C.MonadThrow m) => ExprTy -> Ty.Type -> m ()
+expectsType ty expected = do
+  if typ ty /= expected then
+    C.throwM $ TypeException $ "Couldn't match expected type " -+- (quoteTy $ typ ty) -+- " with actual type " -+- (quoteTy expected)
+  else
+    return ()
+
+getType :: (C.MonadThrow m) => Symbol -> EnvStateT m Ty.Type
+getType sym = do
+  (_, te) <- get
+  case IM.lookup (id sym) te of
+    Just ty -> return ty
+    Nothing ->  C.throwM $ TypeException $ "Undefined type: " -+- (name sym)
+
+getVar :: (C.MonadThrow m) => Symbol -> EnvStateT m EnvEntry
+getVar sym = do
+  (ve, _) <- get
+  case IM.lookup (id sym) ve of
+    Just entry -> return entry
+    Nothing ->  C.throwM $ TypeException $ "Undefined variable: " -+- (name sym)
+
+transLValue :: (C.MonadThrow m) => LValue -> EnvStateT m ExprTy
+transLValue (SimpleVar sym) = do
+  (ve, te) <- get
+  case IM.lookup (id sym) ve of
+    Just (VarEntry var) -> return $ ExprTy var
+    Nothing ->  C.throwM $ TypeException $ "Undefined variable: " -+- (name sym)
+transLValue _ = C.throwM $ TypeException "undef@lvalue"
+
+transExpr :: (C.MonadThrow m) => Expr -> EnvStateT m ExprTy
+transExpr (ValueExpr lv) = transLValue lv
+transExpr NilExpr = return $ ExprTy Ty.Nil
+transExpr (SeqExpr exprs) = do
+  types <- mapM transExpr exprs
+  return $ S.lastDef (ExprTy Ty.Unit) types
+transExpr (ArrayCreation inner n v) = do
+  inner <- getType inner
+  n <- transExpr n
+  v <- transExpr v
+  expectsType n Ty.Int
+  expectsType v inner
+  return $ ExprTy $ Ty.Array inner
+transExpr (IfExpr cond t f) = do
+  cond <- transExpr cond
+  t <- transExpr t
+  f <- transExpr f
+  expectsType cond Ty.Int
+  expectsType t (typ f)
+  return t
+transExpr (LetExpr decs exprs) = do
+  env <- get
+  mapM transDecs decs
+  types <- mapM transExpr exprs
+  put env
+  return $ S.lastDef (ExprTy Ty.Unit) types
+  where
+    transDecs :: (C.MonadThrow m) => Declaration -> EnvStateT m ()
+    transDecs (TypeDec sym ty) = do
+      (ve, te) <- get
+      ty <- fromAbstType ty
+      let te' = IM.insert (id sym) ty te
+      put (ve, te')
+    transDecs (VarDec sym ty init) = do
+      (ve, te) <- get
+      init <- transExpr init
+      ty' <- case ty of
+                Just ty' -> getType ty'
+                Nothing -> return $ typ init
+      expectsType init ty'
+      let ve' = IM.insert (id sym) (VarEntry ty') ve
+      put (ve', te)
+    transDecs (FunDec sym fields ty body) = do
+      (ve, te) <- get
+      fieldTypes <- mapM insertField fields
+      actualRet <- transExpr body
+      ret <- case ty of
+              Just ret -> getType ret
+              Nothing -> return $ typ actualRet
+      expectsType actualRet ret
+      let ve' = IM.insert (id sym) (FunEntry fieldTypes ret) ve
+      put (ve', te)
+
+    insertField :: (C.MonadThrow m) => TyField -> EnvStateT m Ty.Type
+    insertField (Field var ty) = do
+      (ve, te) <- get
+      ty <- getType ty
+      let ve' = IM.insert (id var) (VarEntry ty) ve
+      put (ve', te)
+      return ty
+transExpr (FunctionCall sym exprs) = do
+  callee <- getVar sym
+  case callee of
+    VarEntry _ -> C.throwM $ TypeException $ "'" -+- (name sym) -+- "' is not a function"
+    FunEntry fields ret -> do
+      args <- mapM transExpr exprs
+      if (length args) /= (length fields) then
+        C.throwM $ TypeException "argument count mismatch"
+      else
+        return $ ExprTy ret
+transExpr (IntLit _) = return $ ExprTy Ty.Int
+transExpr (StringLit _) = return $ ExprTy Ty.String
+transExpr (BinaryExpr left _ right) = do
+  left <- transExpr left
+  right <- transExpr right
+  expectsType left Ty.Int
+  expectsType right Ty.Int
+  return $ ExprTy Ty.Int
+transExpr (UnaryExpr _ e) = do
+  e <- transExpr e
+  expectsType e Ty.Int
+  return $ ExprTy Ty.Int
 
 sc :: Parser ()
 sc = L.space
@@ -91,15 +237,15 @@ lexeme = L.lexeme sc
 symbol :: Text -> Parser Text
 symbol = L.symbol sc
 
-identifier :: Parser Identifier
-identifier = lexeme $ register $ (\head tail -> Id $ T.pack $ head ++ tail) <$>
+identifier :: Parser Symbol
+identifier = lexeme $ register $ (\head tail -> T.pack $ head ++ tail) <$>
   (some letterChar) <*> (many $ satisfy isIdChar)
   where
-    register :: Parser Identifier -> Parser Identifier
+    register :: Parser Text -> Parser Symbol
     register id = do
-      (Id name) <- lookAhead id
-      lift $ name2symbol name
-      id
+      name <- lookAhead id
+      sym <- lift $ name2symbol name
+      (\_ -> sym) <$> id
 
     isIdChar x = (isAlphaNum x) || x == '_'
 
@@ -136,12 +282,12 @@ fundec :: Parser Declaration
 fundec = (\_ id _ params _ tyannot _ body -> FunDec id params tyannot body) <$>
          (symbol "function") <*> identifier <*> (symbol "(") <*> tyfields <*> (symbol ")") <*> (optional tyannot) <*> (symbol "=") <*> expr
 
-tyannot :: Parser Identifier
+tyannot :: Parser Symbol
 tyannot = try $ (\_ ty -> ty) <$> (symbol ":") <*> identifier
 
 data PartialLValue
   = PLArray Expr PartialLValue
-  | PLDot   Identifier PartialLValue
+  | PLDot   Symbol PartialLValue
   | PLTerm
 
 lvalue :: Parser LValue
@@ -274,6 +420,10 @@ whole = do
     eof
     return prog
 
+getSymbolId :: Text -> SymbolTable -> Int
+getSymbolId name st =
+  fromMaybe 0 (M.lookup name st)
+
 main :: IO ()
 main = do
   args <- getArgs
@@ -282,7 +432,10 @@ main = do
   let st = runParserT whole srcPath s
   case runState st M.empty of
     (Left err, _) -> putStr $ errorBundlePretty err
-    (Right x, symbols) -> do
-      print x
-      print symbols
+    (Right ast, symbols) -> do
+      print ast
+
+      let te = IM.fromList [(getSymbolId "int" symbols, Ty.Int), (getSymbolId "string" symbols, Ty.String)]
+      let typed = evalStateT (transExpr ast) (IM.empty, te) :: Either C.SomeException ExprTy
+      print typed
 

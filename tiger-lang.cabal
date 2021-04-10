@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 60eaff1013c129bdb4a82a4abb9b57a30ee23e2b894bd4dab4f92d587c442a32
+-- hash: 0b5cc1e30b73ffa4d8587fad4b2ac5588789ec62c0707cb02e4a18441e7b9b3c
 
 name:           tiger-lang
 version:        0.1.0.0
@@ -35,14 +35,17 @@ library
   build-depends:
       base >=4.7 && <5
     , containers
+    , exceptions
     , megaparsec
     , mtl
+    , safe
     , text
   default-language: Haskell2010
 
 executable tiger-lang-exe
   main-is: Main.hs
   other-modules:
+      Types
       Paths_tiger_lang
   hs-source-dirs:
       app
@@ -50,8 +53,10 @@ executable tiger-lang-exe
   build-depends:
       base >=4.7 && <5
     , containers
+    , exceptions
     , megaparsec
     , mtl
+    , safe
     , text
     , tiger-lang
   default-language: Haskell2010
@@ -67,8 +72,10 @@ test-suite tiger-lang-test
   build-depends:
       base >=4.7 && <5
     , containers
+    , exceptions
     , megaparsec
     , mtl
+    , safe
     , text
     , tiger-lang
   default-language: Haskell2010
