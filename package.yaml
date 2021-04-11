@@ -27,6 +27,7 @@ dependencies:
 - mtl
 - exceptions
 - safe
+- here
 
 library:
   source-dirs: src
@@ -45,10 +46,13 @@ executables:
 tests:
   tiger-lang-test:
     main:                Spec.hs
-    source-dirs:         test
+    source-dirs:
+      - app
+      - test
     ghc-options:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
     dependencies:
     - tiger-lang
+    - hspec
