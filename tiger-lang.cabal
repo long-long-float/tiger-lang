@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: b1269e69e34bd140fd908aa3e914691b825429cbe89b2bb60161f830f20ccc9a
+-- hash: c74fbfbed1b8ce4ecbc6751f12057243dfde874192451dae2626bb8c6aeb2e1d
 
 name:           tiger-lang
 version:        0.1.0.0
@@ -35,6 +35,7 @@ library
   build-depends:
       base >=4.7 && <5
     , containers
+    , directory
     , exceptions
     , here
     , megaparsec
@@ -56,6 +57,7 @@ executable tiger-lang-exe
   build-depends:
       base >=4.7 && <5
     , containers
+    , directory
     , exceptions
     , here
     , megaparsec
@@ -81,6 +83,7 @@ test-suite tiger-lang-test
   build-depends:
       base >=4.7 && <5
     , containers
+    , directory
     , exceptions
     , here
     , hspec

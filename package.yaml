@@ -28,6 +28,7 @@ dependencies:
 - exceptions
 - safe
 - here
+- directory
 
 library:
   source-dirs: src
