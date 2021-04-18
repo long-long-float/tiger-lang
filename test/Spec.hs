@@ -50,11 +50,15 @@ main = hspec $ do
   describe "From testcases" $ do
     files <- runIO $ listDirectory "./testcases"
     flip mapM files $ \file -> do
-      it (file ++ " can be compiled") $ do
+      it (file ++ " should be parsed") $ do
         s <- IO.readFile $ "./testcases/" ++ file
-        if T.isInfixOf "error" s then
-          parseAndTypecheck s `shouldNotSatisfy` isJust
-        else
-          parseAndTypecheck s `shouldSatisfy` isJust
+        parse s `shouldSatisfy` isRight
+    -- flip mapM files $ \file -> do
+    --   it (file ++ " can be compiled") $ do
+    --     s <- IO.readFile $ "./testcases/" ++ file
+    --     if T.isInfixOf "error" s then
+    --       parseAndTypecheck s `shouldNotSatisfy` isJust
+    --     else
+    --       parseAndTypecheck s `shouldSatisfy` isJust
     return ()
 

@@ -53,6 +53,8 @@ data Expr
   | FunctionCall Symbol [Expr]
   | BinaryExpr Expr Text Expr
   | UnaryExpr Text Expr
+  | RecordCreation Symbol [(Symbol, Expr)]
+  | AssignExpr LValue Expr
   deriving (Eq, Ord, Show)
 
 name2symbol :: Text -> StateM Symbol
@@ -156,6 +158,7 @@ expr :: Parser Expr
 expr =
       try ifexpr
   <|> try letexpr
+  <|> try (AssignExpr <$> lvalue <* symbol ":=" <*> expr)
   <|> try ((\_ exprs _ -> SeqExpr exprs) <$> symbol "(" <*> seqexpr <*> symbol ")")
   <|> try boolop1
   where
@@ -218,6 +221,7 @@ term = try integerlit
    <|> try stringlit
    <|> try (FunctionCall <$> identifier <* symbol "(" <*> args <* symbol ")")
    <|> try ((\t e1 _ e2 -> ArrayCreation t e1 e2) <$> identifier <* symbol "[" <*> expr <* symbol "]" <*> symbol "of" <*> expr)
+   <|> try recordCreation
    <|> try (ValueExpr <$> lvalue)
    <|> symbol "(" *> expr <* symbol ")"
    where
@@ -233,11 +237,12 @@ stringlit :: Parser Expr
 stringlit = lexeme $ (\_ str _ -> StringLit $ T.pack $ foldl (++) "" str) <$> char '\"' <*> (many ch) <*> char '\"'
   where
     ch :: Parser [Char]
-    ch =  (\c -> [c]) <$> satisfy (\c -> c /= '\"' && isPrint c)
-      <|> (\s c -> [s] ++ c) <$> char '\\' <*> escCh
+    ch =  (\s c -> [s] ++ c) <$> char '\\' <*> escCh
+      <|> (\c -> [c]) <$> satisfy (\c -> c /= '\"' && isPrint c)
 
     escCh :: Parser [Char]
     escCh = one <$> char 'n' <|> one <$> char 't' <|> T.unpack <$> string "^C"
+        <|> one <$> char '\"'
           -- <|> \ddd ...
 
     one e = [e]
@@ -256,6 +261,13 @@ letexpr = (\_ decs _ exprs _ -> LetExpr decs exprs) <$>
     seqexpr = (\head rest -> [head] ++ rest) <$> expr <*> many seqexprrest <|>
               return []
     seqexprrest = (\_ e -> e) <$> symbol ";" <*> expr
+
+recordCreation :: Parser Expr
+recordCreation =
+      (\id head rest -> RecordCreation id $ [head] ++ rest) <$> identifier <* symbol "{" <*> idexp <*> (many $ symbol "," *> idexp) <* symbol "}"
+  <|> (\id -> RecordCreation id []) <$> identifier <* symbol "{" <* symbol "}"
+  where
+    idexp = (,) <$> identifier <* symbol "=" <*> expr
 
 whole :: Parser Expr
 whole = do

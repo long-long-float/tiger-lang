@@ -18,7 +18,7 @@ import qualified Tiger.Parser as P
 data Type
   = Int
   | String
-  -- | Record [(Symbol, Type)]
+  | Record [(Symbol, Type)]
   | Array Type -- TODO: Add unique
   | Nil
   | Unit
@@ -53,16 +53,30 @@ defaultTEnv symbols = IM.fromList [(getSymbolId "int" symbols, Int), (getSymbolI
 
 fromAbstType :: (C.MonadThrow m) => P.Type -> EnvStateT m Type
 fromAbstType (P.NameTy sym) = getType sym
-fromAbstType (P.RecordTy fields) = C.throwM $ UnimplementedException "fromAbstType"
+fromAbstType (P.RecordTy fields) = do
+  pairs <- mapM (\(P.Field id ty) -> do
+    ty <- getType ty
+    return (id, ty)) fields
+  return $ Record pairs
 fromAbstType (P.ArrayTy inner) = do
   inner <- getType inner
   return $ Array inner
+
+throwIf :: (C.MonadThrow m, C.Exception e) => Bool -> e -> m ()
+throwIf cond ex = do
+  if cond then
+    C.throwM ex
+  else
+    return ()
 
 (-+-) :: Text -> Text -> Text
 a -+- b = T.append a b
 
 (-+$) :: Text -> String -> Text
 a -+$ b = T.append a (T.pack b)
+
+($+-) :: String -> Text -> Text
+a $+- b = T.append (T.pack a) b
 
 quoteTy :: Type -> Text
 quoteTy ty = "'" -+$ (show ty) -+- "'"
@@ -102,13 +116,16 @@ transExpr P.NilExpr = return $ ExprTy Nil
 transExpr (P.SeqExpr exprs) = do
   types <- mapM transExpr exprs
   return $ S.lastDef (ExprTy Unit) types
-transExpr (P.ArrayCreation inner n v) = do
-  inner <- getType inner
-  n <- transExpr n
-  v <- transExpr v
-  expectsType n Int
-  expectsType v inner
-  return $ ExprTy $ Array inner
+transExpr (P.ArrayCreation ty n v) = do
+  ty <- getType ty
+  case ty of
+    Array inner -> do
+      n <- transExpr n
+      v <- transExpr v
+      expectsType n Int
+      expectsType v inner
+      return $ ExprTy ty
+    _ -> C.throwM $ TypeException $ (show ty) $+- " must be array"
 transExpr (P.IfExpr cond t f) = do
   cond <- transExpr cond
   t <- transExpr t
@@ -178,4 +195,20 @@ transExpr (P.UnaryExpr _ e) = do
   e <- transExpr e
   expectsType e Int
   return $ ExprTy Int
+transExpr (P.RecordCreation id pairs) = do
+  ty <- getType id
+  case ty of
+    Record tyPairs -> do
+      throwIf ((length pairs) /= (length tyPairs)) (TypeException $ "counts of fields are mismatched")
+
+      flip mapM (zip pairs tyPairs) $ \((id, val), (tyId, tyTy)) -> do
+        throwIf (id /= tyId) (TypeException "ids are mismatched")
+        valTy <- transExpr val
+        expectsType valTy tyTy
+      return $ ExprTy ty
+
+    _ -> C.throwM $ TypeException $ "'" -+- (name id) -+- "' must be a record"
+transExpr (P.AssignExpr lv expr) = do
+  -- TODO: check
+  return $ ExprTy Unit
 
