@@ -47,8 +47,11 @@ data Expr
   | SeqExpr [Expr]
   | IntLit Int
   | StringLit Text
+  | UnitLit
   | ArrayCreation Symbol Expr Expr
-  | IfExpr Expr Expr Expr
+  | IfExpr Expr Expr (Maybe Expr)
+  | WhileExpr Expr Expr
+  | ForExpr Symbol Expr Expr Expr
   | LetExpr [Declaration] [Expr]
   | FunctionCall Symbol [Expr]
   | BinaryExpr Expr Text Expr
@@ -157,6 +160,8 @@ lvalue = buildLValue <$> identifier <*> lvalue'
 expr :: Parser Expr
 expr =
       try ifexpr
+  <|> try whileexpr
+  <|> try forexpr
   <|> try letexpr
   <|> try (AssignExpr <$> lvalue <* symbol ":=" <*> expr)
   <|> try ((\_ exprs _ -> SeqExpr exprs) <$> symbol "(" <*> seqexpr <*> symbol ")")
@@ -219,6 +224,7 @@ term :: Parser Expr
 term = try integerlit
    <|> try ((\_ -> NilExpr) <$> symbol "nil")
    <|> try stringlit
+   <|> try ((\_ -> UnitLit) <$> (symbol "(" *> symbol ")"))
    <|> try (FunctionCall <$> identifier <* symbol "(" <*> args <* symbol ")")
    <|> try ((\t e1 _ e2 -> ArrayCreation t e1 e2) <$> identifier <* symbol "[" <*> expr <* symbol "]" <*> symbol "of" <*> expr)
    <|> try recordCreation
@@ -251,8 +257,16 @@ ifexpr :: Parser Expr
 ifexpr =
   -- this is not correct???
   -- IfExpr <$> symbol "if" *> expr <* symbol "then" *> expr <* symbol "else" *> expr
-  (\_ e1 _ e2 _ e3 -> IfExpr e1 e2 e3) <$> symbol "if" <*> expr <*> symbol "then" <*> expr <*> symbol "else" <*> expr
+  (\_ e1 _ e2 e3 -> IfExpr e1 e2 e3) <$> symbol "if" <*> expr <*> symbol "then" <*> expr <*> (optional $ symbol "else" *> expr)
   -- IfExpr <$> symbol "if" *> expr <* symbol "then" <*> expr <* symbol "else" <*> expr
+
+whileexpr :: Parser Expr
+whileexpr =
+  (\_ e1 _ e2 -> WhileExpr e1 e2) <$> symbol "while" <*> expr <*> symbol "do" <*> expr
+
+forexpr :: Parser Expr
+forexpr =
+  (\_ id _ e1 _ e2 _ e3 -> ForExpr id e1 e2 e3) <$> symbol "for" <*> identifier <*> symbol ":=" <*> expr <*> symbol "to" <*> expr <*> symbol "do" <*> expr
 
 letexpr :: Parser Expr
 letexpr = (\_ decs _ exprs _ -> LetExpr decs exprs) <$>
@@ -264,7 +278,7 @@ letexpr = (\_ decs _ exprs _ -> LetExpr decs exprs) <$>
 
 recordCreation :: Parser Expr
 recordCreation =
-      (\id head rest -> RecordCreation id $ [head] ++ rest) <$> identifier <* symbol "{" <*> idexp <*> (many $ symbol "," *> idexp) <* symbol "}"
+      try ((\id head rest -> RecordCreation id $ [head] ++ rest) <$> identifier <* symbol "{" <*> idexp <*> (many $ symbol "," *> idexp) <* symbol "}")
   <|> (\id -> RecordCreation id []) <$> identifier <* symbol "{" <* symbol "}"
   where
     idexp = (,) <$> identifier <* symbol "=" <*> expr

@@ -81,10 +81,15 @@ a $+- b = T.append (T.pack a) b
 quoteTy :: Type -> Text
 quoteTy ty = "'" -+$ (show ty) -+- "'"
 
+eqType :: Type -> Type -> Bool
+eqType Nil (Record _) = True
+eqType (Record _) Nil = True
+eqType t1 t2 = t1 == t2
+
 expectsType :: (C.MonadThrow m) => ExprTy -> Type -> m ()
 expectsType ty expected = do
-  if typ ty /= expected then
-    C.throwM $ TypeException $ "Couldn't match expected type " -+- (quoteTy $ typ ty) -+- " with actual type " -+- (quoteTy expected)
+  if not $ eqType (typ ty) expected then
+    C.throwM $ TypeException $ "Couldn't match expected type " -+- (quoteTy expected) -+- " with actual type " -+- (quoteTy $ typ ty)
   else
     return ()
 
@@ -101,6 +106,13 @@ getVar sym = do
   case IM.lookup (id sym) ve of
     Just entry -> return entry
     Nothing ->  C.throwM $ TypeException $ "Undefined variable: " -+- (name sym)
+
+insertVar :: (C.MonadThrow m) => Symbol -> Type -> EnvStateT m ()
+insertVar var ty = do
+  (ve, te) <- get
+  let ve' = IM.insert (id var) (VarEntry ty) ve
+  put (ve', te)
+  return ()
 
 transLValue :: (C.MonadThrow m) => P.LValue -> EnvStateT m ExprTy
 transLValue (P.SimpleVar sym) = do
@@ -129,10 +141,32 @@ transExpr (P.ArrayCreation ty n v) = do
 transExpr (P.IfExpr cond t f) = do
   cond <- transExpr cond
   t <- transExpr t
-  f <- transExpr f
   expectsType cond Int
-  expectsType t (typ f)
-  return t
+  case f of
+    Just f -> do
+      f <- transExpr f
+      expectsType t (typ f)
+      return t
+    Nothing -> do
+      expectsType t Unit
+      return $ ExprTy Unit
+transExpr (P.WhileExpr cond body) = do
+  cond <- transExpr cond
+  body <- transExpr body
+  expectsType cond Int
+  expectsType body Unit
+  return $ ExprTy Unit
+transExpr (P.ForExpr id begin end body) = do
+  begin <- transExpr begin
+  end <- transExpr end
+  body <- transExpr body
+  expectsType begin Int
+  expectsType end Int
+  (ve, te) <- get
+  insertVar id Int
+  expectsType body Unit
+  put (ve, te)
+  return $ ExprTy Unit
 transExpr (P.LetExpr decs exprs) = do
   env <- get
   mapM transDecs decs
@@ -151,7 +185,9 @@ transExpr (P.LetExpr decs exprs) = do
       init <- transExpr init
       ty' <- case ty of
                 Just ty' -> getType ty'
-                Nothing -> return $ typ init
+                Nothing -> do
+                  throwIf ((typ init) == Nil) (TypeException "initializing nil not constrained by record type is not accepted")
+                  return $ typ init
       expectsType init ty'
       let ve' = IM.insert (id sym) (VarEntry ty') ve
       put (ve', te)
@@ -163,15 +199,15 @@ transExpr (P.LetExpr decs exprs) = do
               Just ret -> getType ret
               Nothing -> return $ typ actualRet
       expectsType actualRet ret
+
+      put (ve, te)
       let ve' = IM.insert (id sym) (FunEntry fieldTypes ret) ve
       put (ve', te)
 
     insertField :: (C.MonadThrow m) => P.TyField -> EnvStateT m Type
     insertField (P.Field var ty) = do
-      (ve, te) <- get
       ty <- getType ty
-      let ve' = IM.insert (id var) (VarEntry ty) ve
-      put (ve', te)
+      insertVar var ty
       return ty
 transExpr (P.FunctionCall sym exprs) = do
   callee <- getVar sym
@@ -179,18 +215,30 @@ transExpr (P.FunctionCall sym exprs) = do
     VarEntry _ -> C.throwM $ TypeException $ "'" -+- (name sym) -+- "' is not a function"
     FunEntry fields ret -> do
       args <- mapM transExpr exprs
-      if (length args) /= (length fields) then
-        C.throwM $ TypeException "argument count mismatch"
-      else
-        return $ ExprTy ret
+      throwIf ((length args) /= (length fields)) (TypeException "argument count mismatch")
+      flip mapM (zip fields args) $ \(fty, aty) -> do
+        expectsType aty fty
+      return $ ExprTy ret
 transExpr (P.IntLit _) = return $ ExprTy Int
 transExpr (P.StringLit _) = return $ ExprTy String
-transExpr (P.BinaryExpr left _ right) = do
-  left <- transExpr left
+transExpr (P.UnitLit) = return $ ExprTy Unit
+transExpr (P.BinaryExpr left op right) = do
+  left  <- transExpr left
   right <- transExpr right
-  expectsType left Int
-  expectsType right Int
-  return $ ExprTy Int
+
+  if op == "+" || op == "-" || op == "*" || op == "/" || op == "&" || op == "|" then do
+    -- Arithmetic and Boolean
+    expectsType left Int
+    expectsType right Int
+    return $ ExprTy Int
+  else do
+    -- Comparison
+    throwIf (not $ eqType (typ left) (typ right)) (TypeException "types of left and right of binary expression must equal")
+    let ty = typ left
+    if ty /= Int && ty /= String && op /= "=" && op /= "<>" then
+      C.throwM $ TypeException $ "this type " -+- (quoteTy ty) -+- " cannot use the operator " -+- op
+    else
+      return $ ExprTy Int
 transExpr (P.UnaryExpr _ e) = do
   e <- transExpr e
   expectsType e Int
