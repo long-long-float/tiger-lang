@@ -5,6 +5,7 @@ module Tiger.Types where
 import Prelude hiding (id)
 import Data.Text (Text)
 import Data.Maybe
+import Data.List
 import Control.Monad.State
 import qualified Control.Monad.Catch as C
 import qualified Data.IntMap.Strict as IM
@@ -116,11 +117,23 @@ insertVar var ty = do
 
 transLValue :: (C.MonadThrow m) => P.LValue -> EnvStateT m ExprTy
 transLValue (P.SimpleVar sym) = do
-  (ve, te) <- get
-  case IM.lookup (id sym) ve of
-    Just (VarEntry var) -> return $ ExprTy var
-    Nothing ->  C.throwM $ TypeException $ "Undefined variable: " -+- (name sym)
-transLValue _ = C.throwM $ TypeException "undef@lvalue"
+  v <- getVar sym
+  case v of
+    VarEntry var -> return $ ExprTy var
+    FunEntry _ _ -> C.throwM $ TypeException $ "'" -+- (name sym) -+- "' must be a variable"
+transLValue (P.FieldVar rlv field) = do
+  rlv <- transLValue rlv
+  case typ rlv of
+    Record pairs -> do
+      case find (\(sym, ty) -> sym == field) pairs of
+        Just (_, ty) -> return $ ExprTy ty
+        Nothing -> C.throwM $ TypeException $ "The field '" -+- (name field) -+- "' is not defined"
+    _ -> C.throwM $ TypeException $ "The value of '" -+- (name field) -+- "' must be a record"
+transLValue (P.SubscriptVar rlv idx) = do
+  rlv' <- transLValue rlv
+  case typ rlv' of
+    Array ty -> return $ ExprTy ty
+    _ -> C.throwM $ TypeException $ "The value '" -+$ (show rlv) -+- "' must be a array"
 
 transExpr :: (C.MonadThrow m) => P.Expr -> EnvStateT m ExprTy
 transExpr (P.ValueExpr lv) = transLValue lv
@@ -196,9 +209,13 @@ transExpr (P.LetExpr decs exprs) = do
       fieldTypes <- mapM insertField fields
       actualRet <- transExpr body
       ret <- case ty of
-              Just ret -> getType ret
-              Nothing -> return $ typ actualRet
-      expectsType actualRet ret
+        Just ret -> do
+          ret <- getType ret
+          expectsType actualRet ret
+          return ret
+        Nothing -> do
+          throwIf ((typ actualRet) /= Unit) (TypeException "Procedure cannot return value")
+          return Unit
 
       put (ve, te)
       let ve' = IM.insert (id sym) (FunEntry fieldTypes ret) ve
@@ -257,6 +274,8 @@ transExpr (P.RecordCreation id pairs) = do
 
     _ -> C.throwM $ TypeException $ "'" -+- (name id) -+- "' must be a record"
 transExpr (P.AssignExpr lv expr) = do
-  -- TODO: check
+  lv <- transLValue lv
+  expr <- transExpr expr
+  expectsType expr (typ lv)
   return $ ExprTy Unit
 
