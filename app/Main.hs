@@ -27,6 +27,7 @@ main = do
     Right (ast, symbols) -> do
       print ast
 
-      let typed = evalStateT (Ty.transExpr ast) (IM.empty, Ty.defaultTEnv symbols) :: Either C.SomeException Ty.ExprTy
-      print typed
+      case evalStateT (Ty.transExpr ast) (IM.empty, Ty.defaultTEnv symbols) :: Either C.SomeException Ty.ExprTy of
+        Right typed -> print typed
+        Left err -> print err
 

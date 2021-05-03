@@ -15,6 +15,7 @@ import qualified Data.IntMap.Strict as IM
 
 import qualified Tiger.Parser as P
 import qualified Tiger.Types as Ty
+import qualified Tiger.Symbol as S
 
 parse = P.parse ""
 
@@ -24,12 +25,11 @@ parseAndTypecheck src =
     Right (ast, symbols) -> do
       evalStateT (Ty.transExpr ast) (IM.empty, Ty.defaultTEnv symbols) :: Maybe Ty.ExprTy
 
-shouldBeType a ty = a `shouldBe` (Just (Ty.ExprTy ty))
-
-shouldBeRight a = shouldSatisfy a isRight
+shouldBeType a ty = a `shouldBe` (Just (Ty.ExprTy $ Ty.TypeWithName ty S.emptySymbol))
 
 -- From testcases
 haveParseError = ["test49.tig"]
+haveTypeError = ["test43.tig"]
 
 main :: IO ()
 main = hspec $ do
@@ -67,7 +67,8 @@ main = hspec $ do
     flip mapM files $ \file -> do
       it (file ++ " can be compiled") $ do
         s <- IO.readFile $ "./testcases/" ++ file
-        if T.isInfixOf "error" s then
+        let err = any (\f -> isInfixOf f file) haveTypeError
+        if err || T.isInfixOf "error" s then
           parseAndTypecheck s `shouldNotSatisfy` isJust
         else
           parseAndTypecheck s `shouldSatisfy` isJust
