@@ -24,7 +24,8 @@ data Type
   | Array TypeWithName -- TODO: Add unique
   | Nil
   | Unit
-  -- | Name
+  | Name
+  | Undetermined -- This is used for recursive types
   deriving (Eq, Ord, Show)
 
 data TypeWithName = TypeWithName { ty :: Type, name :: Symbol }
@@ -41,6 +42,11 @@ type VEnv = Table EnvEntry
 type TEnv = Table TypeWithName
 type EnvStateT m a = StateT (VEnv, TEnv) m a
 
+formatEnv :: (VEnv, TEnv) -> Text
+formatEnv (ve, te) = "Var Env:\n  " -+- (formatTable ve) -+- "\nType Env:\n  " -+- (formatTable te)
+  where
+    formatTable table = T.intercalate "\n  " $ map (\(k, v) -> (show k) $+- " = " -+$ (show v)) $ IM.toList table
+
 data ExprTy = ExprTy { ty_ :: TypeWithName }
   deriving (Eq, Ord, Show)
 
@@ -55,14 +61,36 @@ instance C.Exception TypeException
 data UnimplementedException = UnimplementedException Text deriving (Show)
 instance C.Exception UnimplementedException
 
+dumpEnv :: (C.MonadThrow m) => EnvStateT m TypeWithName
+dumpEnv = do
+  env' <- get
+  C.throwM $ TypeException $ formatEnv env'
+
 getSymbolId :: Text -> SymbolTable -> Int
 getSymbolId name st =
   fromMaybe 0 (M.lookup name st)
 
-defaultTEnv :: SymbolTable -> TEnv
-defaultTEnv symbols = IM.fromList [
-  (getSymbolId "int" symbols, anon Int),
-  (getSymbolId "string" symbols, anon String)]
+defaultEnv :: SymbolTable -> (VEnv, TEnv)
+defaultEnv symbols = (ve, te)
+  where
+    ve = IM.fromList [
+      (s "print", FunEntry [string] unit),
+      (s "flush", FunEntry [] unit),
+      (s "getchar", FunEntry [] string),
+      (s "ord", FunEntry [string] int),
+      (s "chr", FunEntry [int] string),
+      (s "size", FunEntry [string] int),
+      (s "substring", FunEntry [string, int, int] string),
+      (s "concat", FunEntry [string, string] string),
+      (s "not", FunEntry [int] int),
+      (s "exit", FunEntry [int] unit)]
+    te = IM.fromList [
+      (s "int", int),
+      (s "string", string)]
+    s sym = getSymbolId sym symbols
+    string = anon String
+    int = anon Int
+    unit = anon Unit
 
 fromAbstType :: (C.MonadThrow m) => P.Type -> EnvStateT m TypeWithName
 fromAbstType (P.NameTy sym) = getType sym
@@ -100,10 +128,18 @@ quote s = "'" -+$ show s -+- "'"
 returnTy :: (C.MonadThrow m) => Type -> EnvStateT m ExprTy
 returnTy ty = return $ ExprTy $ TypeWithName ty emptySymbol
 
-eqType :: TypeWithName -> TypeWithName -> Bool
-eqType (TypeWithName t1 id1) (TypeWithName t2 id2) =
-  (eqName id1 id2) && (eqType' t1 t2)
+eqType :: (C.MonadThrow m) => TypeWithName -> TypeWithName -> EnvStateT m Bool
+eqType (TypeWithName t1 id1) (TypeWithName t2 id2) = do
+  t1 <- resolveType t1 id1
+  t2 <- resolveType t2 id2
+  return $ (eqName id1 id2) && (eqType' t1 t2)
   where
+    resolveType :: (C.MonadThrow m) => Type -> Symbol -> EnvStateT m Type
+    resolveType Name sym = do
+      ty' <- getType sym
+      return $ ty ty'
+    resolveType ty _ = return ty
+
     eqName (Symbol "" _) _ = True
     eqName _ (Symbol "" _) = True
     eqName n1 n2 = n1 == n2
@@ -112,27 +148,41 @@ eqType (TypeWithName t1 id1) (TypeWithName t2 id2) =
     eqType' (Record _) Nil = True
     eqType' t1 t2 = t1 == t2
 
-expectsType :: (C.MonadThrow m) => ExprTy -> TypeWithName -> m ()
+expectsType :: (C.MonadThrow m) => ExprTy -> TypeWithName -> EnvStateT m ()
 expectsType ty expected = do
-  if not $ eqType (ty_ ty) expected then
+  eqt <- eqType (ty_ ty) expected
+  if not eqt then do
+    dumpEnv
     C.throwM $ TypeException $ "Couldn't match expected type " -+- (quote expected) -+- " with actual type " -+- (quote $ ty_ ty)
   else
     return ()
 
 getType :: (C.MonadThrow m) => Symbol -> EnvStateT m TypeWithName
-getType sym = do
-  (_, te) <- get
-  case IM.lookup (S.id sym) te of
-    -- Just ty -> return $ TypeWithName ty sym
-    Just ty -> return ty
-    Nothing ->  C.throwM $ TypeException $ "Undefined type: " -+- (S.name sym)
+getType sym = getType' sym []
+  where
+    getType' :: (C.MonadThrow m) => Symbol -> [Symbol] -> EnvStateT m TypeWithName
+    getType' sym path = do
+      throwIf (elem sym path) (TypeException $ "circular reference: " -+- (S.name sym))
+      (_, te) <- get
+      case IM.lookup (S.id sym) te of
+        Just (TypeWithName Name sym') -> getType' sym' $ sym:path
+        Just (TypeWithName Undetermined sym') -> return $ TypeWithName Name sym'
+        Just ty -> return ty
+        Nothing -> C.throwM $ TypeException $ "Undefined type: " -+- (S.name sym)
+
+insertType :: (C.MonadThrow m) => Symbol -> TypeWithName -> EnvStateT m ()
+insertType name ty = do
+  (ve, te) <- get
+  let te' = IM.insert (S.id name) ty te
+  put (ve, te')
+  return ()
 
 getVar :: (C.MonadThrow m) => Symbol -> EnvStateT m EnvEntry
 getVar sym = do
   (ve, _) <- get
   case IM.lookup (S.id sym) ve of
     Just entry -> return entry
-    Nothing ->  C.throwM $ TypeException $ "Undefined variable: " -+- (S.name sym)
+    Nothing ->  C.throwM $ TypeException $ "Undefined variable or function: " -+- (S.name sym)
 
 insertVar :: (C.MonadThrow m) => Symbol -> TypeWithName -> EnvStateT m ()
 insertVar var ty = do
@@ -198,21 +248,44 @@ transExpr (P.WhileExpr cond body) = do
 transExpr (P.ForExpr id begin end body) = do
   begin <- transExpr begin
   end <- transExpr end
-  body <- transExpr body
   expectsType begin $ anon Int
   expectsType end $ anon Int
   (ve, te) <- get
   insertVar id $ anon Int
+  body <- transExpr body
   expectsType body $ anon Unit
   put (ve, te)
   returnTy Unit
 transExpr (P.LetExpr decs exprs) = do
   env <- get
+  mapM scanDecs decs
   mapM transDecs decs
   types <- mapM transExpr exprs
   put env
   return $ Safe.lastDef (ExprTy $ anon Unit) types
   where
+    scanDecs :: (C.MonadThrow m) => P.Declaration -> EnvStateT m ()
+    scanDecs (P.TypeDec sym aty) = do
+      -- insertType sym $ TypeWithName Name sym
+      insertType sym $ TypeWithName Undetermined sym
+    scanDecs (P.VarDec sym ty init) = do
+      return ()
+    scanDecs (P.FunDec sym fields ty body) = do
+      fieldTypes <- mapM (\(P.Field _ ty) -> getTypeOrName ty) fields
+      ret <- case ty of
+                Just ret -> getTypeOrName ret
+                Nothing -> return $ anon Unit
+      (ve, te) <- get
+      let ve' = IM.insert (S.id sym) (FunEntry fieldTypes ret) ve
+      put (ve', te)
+    getTypeOrName :: (C.MonadThrow m) => Symbol -> EnvStateT m TypeWithName
+    getTypeOrName sym = do
+      (_, te) <- get
+      case IM.lookup (S.id sym) te of
+        Just (TypeWithName Undetermined sym') -> return $ TypeWithName Name sym'
+        Just ty -> return ty
+        Nothing -> return $ TypeWithName Name sym
+
     transDecs :: (C.MonadThrow m) => P.Declaration -> EnvStateT m ()
     transDecs (P.TypeDec sym aty) = do
       (ve, te) <- get
@@ -280,7 +353,8 @@ transExpr (P.BinaryExpr left op right) = do
     returnTy Int
   else do
     -- Comparison
-    throwIf (not $ eqType (ty_ left) (ty_ right)) (TypeException "types of left and right of binary expression must equal")
+    eqLeftAndRight <- eqType (ty_ left) (ty_ right)
+    throwIf (not eqLeftAndRight) (TypeException "types of left and right of binary expression must equal")
     let ty = typeOf left
     if ty /= Int && ty /= String && op /= "=" && op /= "<>" then
       C.throwM $ TypeException $ "this type " -+- (quoteTy ty) -+- " cannot use the operator " -+- op

@@ -2,16 +2,12 @@
 
 import Data.Text (Text)
 import Data.Int (Int)
-import Data.Maybe
 import Control.Monad.State
 import System.Environment (getArgs)
 import Text.Megaparsec hiding (State)
 import qualified Control.Monad.Catch as C
-import qualified Data.IntMap.Strict as IM
 import qualified Data.Text as T
 import qualified Data.Text.IO as IO
-import qualified Safe as S
-import qualified Data.Map.Strict as M
 
 import Tiger.Symbol
 import qualified Tiger.Parser as P
@@ -25,9 +21,10 @@ main = do
   case P.parse srcPath s of
     Left err -> putStr $ errorBundlePretty err
     Right (ast, symbols) -> do
-      print ast
-
-      case evalStateT (Ty.transExpr ast) (IM.empty, Ty.defaultTEnv symbols) :: Either C.SomeException Ty.ExprTy of
+      print symbols
+      case evalStateT (Ty.transExpr ast) (Ty.defaultEnv symbols) :: Either C.SomeException Ty.ExprTy of
         Right typed -> print typed
-        Left err -> print err
+        Left ex -> case C.fromException ex of
+          Just (Ty.TypeException msg) -> IO.putStrLn msg
+          Nothing -> print ex
 
