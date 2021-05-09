@@ -259,6 +259,7 @@ transExpr (P.ForExpr id begin end body) = do
 transExpr (P.LetExpr decs exprs) = do
   env <- get
   mapM scanDecs decs
+  mapM resolveDecs decs
   mapM transDecs decs
   types <- mapM transExpr exprs
   put env
@@ -286,8 +287,8 @@ transExpr (P.LetExpr decs exprs) = do
         Just ty -> return ty
         Nothing -> return $ TypeWithName Name sym
 
-    transDecs :: (C.MonadThrow m) => P.Declaration -> EnvStateT m ()
-    transDecs (P.TypeDec sym aty) = do
+    resolveDecs :: (C.MonadThrow m) => P.Declaration -> EnvStateT m ()
+    resolveDecs (P.TypeDec sym aty) = do
       (ve, te) <- get
       (TypeWithName ty' sym') <- fromAbstType aty
       let sym'' = if sym' == emptySymbol then
@@ -296,6 +297,24 @@ transExpr (P.LetExpr decs exprs) = do
                     sym'
       let te' = IM.insert (S.id sym) (TypeWithName ty' sym'') te
       put (ve, te')
+    resolveDecs (P.VarDec sym ty init) = do
+      return ()
+    resolveDecs (P.FunDec sym fields ty body) = do
+      (ve, te) <- get
+      fieldTypes <- mapM (\(P.Field _ ty) -> getType ty) fields
+      ret <- case ty of
+                  Just ret -> do
+                    ret <- getType ret
+                    return ret
+                  Nothing -> do
+                    return $ anon Unit
+      put (ve, te)
+      let ve' = IM.insert (S.id sym) (FunEntry fieldTypes ret) ve
+      put (ve', te)
+
+    transDecs :: (C.MonadThrow m) => P.Declaration -> EnvStateT m ()
+    transDecs (P.TypeDec sym aty) = do
+      return ()
     transDecs (P.VarDec sym ty init) = do
       (ve, te) <- get
       init <- transExpr init
@@ -319,7 +338,6 @@ transExpr (P.LetExpr decs exprs) = do
         Nothing -> do
           throwIf ((typeOf actualRet) /= Unit) (TypeException "Procedure cannot return value")
           return $ anon Unit
-
       put (ve, te)
       let ve' = IM.insert (S.id sym) (FunEntry fieldTypes ret) ve
       put (ve', te)
